@@ -1,3 +1,5 @@
+![Banner](banner.png)
+
 # misconfig-ConfigPropertyExposureAnalyzer
 Identifies configuration properties that are unintentionally exposed through APIs, logs, or other interfaces, potentially leading to sensitive information disclosure. - Focused on Check for misconfigurations in configuration files or infrastructure definitions
 
