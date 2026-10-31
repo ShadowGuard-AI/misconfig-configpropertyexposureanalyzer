@@ -27,7 +27,16 @@ class ConfigPropertyExposureAnalyzer:
         """
         self.config_files = config_files
         # Default keywords for sensitive information
-        self.keywords = keywords if keywords else ['password', 'secret', 'api_key', 'token', 'private_key', 'credential', 'auth_token', 'db_password']
+        default_keywords = ['password', 'secret', 'api_key', 'token', 'private_key', 'credential', 'auth_token', 'db_password']
+        if keywords:
+            merged = list(default_keywords)
+            for kw in keywords:
+                if kw.lower() not in [k.lower() for k in merged]:
+                    merged.append(kw)
+            self.keywords = merged
+        else:
+            self.keywords = list(default_keywords)
+        self.load_errors = []
         # Default regex patterns for redacting potentially exposed information
         self.redact_patterns = redact_patterns if redact_patterns else [r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b', r'\b\d{3}-\d{2}-\d{4}\b', r'\b(?:4[0-9]{12}(?:[0-9]{3})?|[25][1-7][0-9]{14}|6(?:011|5[0-9][0-9])[0-9]{12}|3[47][0-9]{13}|3(?:0[0-5]|[68][0-9])[0-9]{11}|(?:2131|1800|35\d{3})\d{11})\b']
         self.findings = []
@@ -76,19 +85,30 @@ class ConfigPropertyExposureAnalyzer:
         if isinstance(data, dict):
             for key, value in data.items():
                 current_key = f"{parent_key}.{key}" if parent_key else key
+                # Primary signal: the property (key) name itself.
+                for keyword in self.keywords:
+                    if keyword.lower() in str(key).lower():
+                        self.findings.append({
+                            'file': file_path,
+                            'key': current_key,
+                            'keyword': keyword,
+                            'matched_on': 'key'
+                        })
                 self.search_for_keywords(value, file_path, current_key)
         elif isinstance(data, list):
             for i, item in enumerate(data):
                 current_key = f"{parent_key}[{i}]" if parent_key else f"[{i}]"
                 self.search_for_keywords(item, file_path, current_key)
         elif isinstance(data, str):
+            # Second, labelled signal: keyword text inside a string value.
+            # The value itself is never stored or printed.
             for keyword in self.keywords:
                 if keyword.lower() in str(data).lower():  # Case-insensitive comparison
                     self.findings.append({
                         'file': file_path,
                         'key': parent_key,
-                        'value': self.redact_sensitive_data(data),
-                        'keyword': keyword
+                        'keyword': keyword,
+                        'matched_on': 'value'
                     })
 
     def redact_sensitive_data(self, data):
@@ -114,13 +134,18 @@ class ConfigPropertyExposureAnalyzer:
             try:
                 logging.info(f"Analyzing file: {config_file}")
                 config_data = self.load_config_file(config_file)
+                if config_data is None:
+                    raise ValueError(f"No data loaded from file (empty file): {config_file}")
                 self.search_for_keywords(config_data, config_file)
             except FileNotFoundError as e:
                 logging.error(str(e))
+                self.load_errors.append(config_file)
             except ValueError as e:
                 logging.error(str(e))
+                self.load_errors.append(config_file)
             except Exception as e:
                 logging.error(f"Error analyzing {config_file}: {e}")
+                self.load_errors.append(config_file)
 
     def generate_report(self):
         """
@@ -141,8 +166,8 @@ def setup_argparse():
     """
     parser = argparse.ArgumentParser(description="Analyze configuration files for potential sensitive property exposure.")
     parser.add_argument("config_files", nargs='+', help="Path(s) to the configuration file(s).")
-    parser.add_argument("-k", "--keywords", nargs='+', help="Custom keywords to search for (comma-separated).", default=None)
-    parser.add_argument("-r", "--redact_patterns", nargs='+', help="Custom regex patterns for redacting sensitive data (comma-separated).", default=None)
+    parser.add_argument("-k", "--keywords", nargs='+', help="Custom keywords to search for (space-separated). Custom keywords extend the built-in default list, they do not replace it.", default=None)
+    parser.add_argument("-r", "--redact_patterns", nargs='+', help="Custom regex patterns for redacting sensitive data (space-separated).", default=None)
     parser.add_argument("-o", "--output", help="Output file for report (JSON format). If not provided, prints to stdout.", default=None)
     return parser
 
@@ -160,6 +185,14 @@ def main():
             print(f"Error: File '{file_path}' not found.")
             sys.exit(1)
         
+    # Refuse, under the settled in-place rule, an output path that is an input file.
+    if args.output:
+        output_resolved = os.path.realpath(args.output)
+        for file_path in args.config_files:
+            if os.path.realpath(file_path) == output_resolved:
+                print(f"Error: Output file '{args.output}' is the same as input file '{file_path}'. Refusing to overwrite an input file.")
+                sys.exit(1)
+
     # Process keywords and redact patterns
     keywords = args.keywords
     redact_patterns = args.redact_patterns
@@ -179,8 +212,15 @@ def main():
     else:
         if findings:
             print(json.dumps(findings, indent=4))
-        else:
+        elif not analyzer.load_errors:
             print("No sensitive information found.")
+
+    if analyzer.load_errors:
+        for failed in analyzer.load_errors:
+            print(f"Error: File could not be analyzed: {failed}")
+        sys.exit(1)
+    if findings:
+        sys.exit(1)
 
 
 if __name__ == "__main__":
