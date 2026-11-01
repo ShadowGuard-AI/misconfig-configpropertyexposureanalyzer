@@ -38,6 +38,12 @@ class ConfigPropertyExposureAnalyzer:
             self.keywords = list(default_keywords)
         self.load_errors = []
         # Default regex patterns for redacting potentially exposed information
+        # These patterns, and any the operator passes with the redact
+        # flag, feed exactly one function, redact_sensitive_data, and
+        # nothing in this file ever calls it. Findings carry no values
+        # to redact, so the patterns and the command line option for
+        # them are inert: a run with custom patterns behaves exactly
+        # like a run without them.
         self.redact_patterns = redact_patterns if redact_patterns else [r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b', r'\b\d{3}-\d{2}-\d{4}\b', r'\b(?:4[0-9]{12}(?:[0-9]{3})?|[25][1-7][0-9]{14}|6(?:011|5[0-9][0-9])[0-9]{12}|3[47][0-9]{13}|3(?:0[0-5]|[68][0-9])[0-9]{11}|(?:2131|1800|35\d{3})\d{11})\b']
         self.findings = []
 
@@ -87,6 +93,11 @@ class ConfigPropertyExposureAnalyzer:
                 current_key = f"{parent_key}.{key}" if parent_key else key
                 # Primary signal: the property (key) name itself.
                 for keyword in self.keywords:
+                    # Substring matching on the key name: token matches inside
+                    # tokenizer, and one key can match several keywords at once,
+                    # db_password earning a finding for password and another for
+                    # db_password. My findings count is therefore a count of
+                    # keyword hits, not of distinct exposed properties.
                     if keyword.lower() in str(key).lower():
                         self.findings.append({
                             'file': file_path,
@@ -103,6 +114,12 @@ class ConfigPropertyExposureAnalyzer:
             # Second, labelled signal: keyword text inside a string value.
             # The value itself is never stored or printed.
             for keyword in self.keywords:
+                # A value matches when the keyword appears anywhere in its
+                # text, so a sentence explaining that passwords are managed
+                # elsewhere is reported as an exposure. Because I never store
+                # the value, the report cannot show the reader why I flagged
+                # it, and a prose mention and a real credential are
+                # indistinguishable in my output.
                 if keyword.lower() in str(data).lower():  # Case-insensitive comparison
                     self.findings.append({
                         'file': file_path,
@@ -135,6 +152,10 @@ class ConfigPropertyExposureAnalyzer:
                 logging.info(f"Analyzing file: {config_file}")
                 config_data = self.load_config_file(config_file)
                 if config_data is None:
+                    # An empty file counts as a load error, while a file holding
+                    # an empty mapping loads, searches, and reports clean. The
+                    # difference is the parser's None against an empty dict, and
+                    # it decides whether the run fails or passes.
                     raise ValueError(f"No data loaded from file (empty file): {config_file}")
                 self.search_for_keywords(config_data, config_file)
             except FileNotFoundError as e:
@@ -204,6 +225,11 @@ def main():
     if args.output:
         try:
             with open(args.output, 'w') as outfile:
+                # The report is written before the load error check below,
+                # so a run where one file failed and another produced
+                # findings still leaves a report file behind while exiting
+                # 1. A reader who trusts the file without the exit code sees
+                # a partial result presented as the whole analysis.
                 json.dump(findings, outfile, indent=4)
             logging.info(f"Report saved to {args.output}")
         except Exception as e:
